@@ -1,0 +1,539 @@
+---
+title: "How to HMDA - NICAR 2026"
+author: "Sahana Jayaraman"
+---
+
+# SETUP
+
+```{r}
+# turn off scientific notation
+options(scipen = 999)
+# cache census shape files 
+options(tigris_use_cache = TRUE)
+
+# little function to make life easier 
+Negate("%in%") -> `%notin%`
+
+library(tidyverse)
+library(janitor)
+library(vroom)
+library(sf)
+library(leafsync)
+library(tidycensus)
+library(mapview)
+library(httr2)
+library(purrr)
+
+```
+
+# Prologue: What is this class + what is HMDA + What are DSCR loans, in brief.
+
+Hi! Welcome to how to HMDA, a 1-hour hands-on course from NICAR 2026. The text at the top of this notebook is a little long, since I'm introducing a few new concepts. To skip to the analysis, go to the section titled "**Chapter 1: finding the loans in your city."**
+
+### What is this 'HMDA data' we are working with?
+
+HMDA stands for 'Home Mortgage Disclosure Act,' a federal law passed in 1975 requiring home mortgage lenders to make public detailed information about individual loans without borrower names attached. The law was written in response to the widespread practice of redlining — the practice of lenders denying capital to some neighborhoods because of their residents' income, race or ethnicity.
+
+In the act's early days, it only required lenders to report the geographic location of originated and purchased home loans. In the years since, lawmakers have expanded it to require records about denied home loans and the race, sex and income of applicants.
+
+Most lenders handing out mortgages secured by residential property -- banks, credit unions and private lenders alike -- have to report to HMDA. But not all! There are a series of thresholds lenders must meet to be required to report. **Institutional and large-volume lenders generally meet those thresholds, but small or new lenders don't necessarily**. Thresholds for inclusion have also fluctuated over the years – not super drastically, but something to keep in mind as you work with this!
+
+Data must be collected and submitted on all dwelling-related loan applications by March 1 of each year (though there's a long period for re-submission and late submission). So, data for 2025 lending was due this week! The latest vintage of available data is from 2024.
+
+### ... and what is a DSCR loan? (slash, why do I care?)
+
+Okay, I promise the concept behind this acronym isn't as complicated as it might feel: A DSCR loan, or debt service coverage ratio loan, is a relatively new type of real estate loan geared at investors.
+
+Its requirements are less stringent than those of a traditional loan: To get one, applicants need a good credit score and **an analysis showing that projected rent would exceed their monthly mortgage dues**. They don't need to report their income, or prove they have a borrower lined up. They can come through very fast: One lender told me it can take as little as a couple of weeks to get one.
+
+As for why you should care about this loan type, which has quietly gained steam across the nation since the pandemic: [The housing hustle igniting a foreclosure crisis in Baltimore](https://www.thebanner.com/community/housing/baltimore-housing-foreclosure-dscr-HFPWHAWCY5HRLPR2VZSUAQWW24/)
+
+# Chapter 1: finding the loans in your city
+
+## Load data
+
+Commented out below are the lines of code I used to load in raw HMDA files downloaded from the data browser. The data is **chunky** and takes a long time to load, so for this class we're going to start with a pre-processed file. Here's a quick explanation of the filters we're applying to create it.
+
+What we're starting with: Raw data with one row per loan application, every year 2018 through 2024 (the latest year for which data is available right now).
+
+*why 2018 and not before?*
+
+A handful of reasons!
+
+There were some big shifts in the way HMDA was reported in 2018: For example, it's the first year with the debt-to-income ratio field, a field crucial to our selection of DSCR loans. More on that below.
+
+That includes originated loans, approved but not accepted, withdrawn and incomplete applications, denied applications... all the things! But what we're interested in for this analysis is `originated loans - loans that were offered and accepted`.
+
+The other filters implemented ensure we're focused on loans that are first liens, are traditional closed-end mortgages, and are secured by 1-4 unit investment property.
+
+TL;DR our *universe of loans*: Originated loans that are first liens, secured by *1-4 unit residential investment*\* property (HMDA refers to this as single family property, and that's what I'll call it moving forward + how I've written about it!)
+
+```{r}
+
+# hmda_24 <- vroom("data/raw/hmda/hmda_2024_all.csv")
+# hmda_23 <- vroom("data/raw/hmda/hmda_2023_all.csv")
+# hmda_22 <- vroom("data/raw/hmda/hmda_2022_all.csv")
+# hmda_21 <- vroom("data/raw/hmda/hmda_2021_all.csv")
+# hmda_20 <- vroom("data/raw/hmda/hmda_2020_all.csv")
+# hmda_19 <- vroom("data/raw/hmda/hmda_2019_all.csv")
+# hmda_18 <- vroom("data/raw/hmda/hmda_2018_all.csv")
+# 
+# # this function cleans our HMDA data and gets us to the total universe of our loans: First lien loans issued on just residential investment properties, only loans offered and accepted, and no open lines of credit.
+# hmda_cln <- function(df){
+# 
+#   unit_lst <- c(1,2,3,4)
+# 
+#   temp <- df %>%
+#     # cleans col names
+#     clean_names() %>%
+#     # selects relevant cols
+#     select(activity_year, lei, derived_msa_md, state_code, county_code, census_tract, lien_status, occupancy_type, action_taken, open_end_line_of_credit, debt_to_income_ratio, income, loan_amount, interest_rate, total_units, loan_term, business_or_commercial_purpose, purchaser_type, tract_minority_population_percent, tract_owner_occupied_units) %>%
+#     # makes msa code and year numeric
+#     mutate(activity_year = as.numeric(activity_year),
+#            derived_msa_md = as.numeric(derived_msa_md)) %>%
+#     filter(lien_status == 1) %>% # first lien
+#     filter(occupancy_type == 3) %>% # just investment properties
+#     filter(action_taken == 1)  %>% # only actual loans offered and accepted
+#     filter(open_end_line_of_credit == 2) %>% # only traditional closed lines of credit
+#     mutate(total_units = as.numeric(total_units)) %>% # total units as numeric
+#     filter(total_units %in% unit_lst) # filter only loans issued to secure between 1 and 4 dwelling units (no giant apartment buildings)
+# 
+#   return(temp)
+# 
+# }
+# 
+# hmda_24_cln <- hmda_cln(hmda_24)
+# hmda_23_cln <- hmda_cln(hmda_23)
+# hmda_22_cln <- hmda_cln(hmda_22)
+# hmda_21_cln <- hmda_cln(hmda_21)
+# hmda_20_cln <- hmda_cln(hmda_20)
+# hmda_19_cln <- hmda_cln(hmda_19)
+# hmda_18_cln <- hmda_cln(hmda_18)
+# 
+# # convert income to char to bind rows
+# hmda_22_cln <- hmda_22_cln %>% mutate(income = as.character(income))
+# hmda_20_cln <- hmda_20_cln %>% mutate(income = as.character(income))
+# hmda_19_cln <- hmda_19_cln %>% mutate(income = as.character(income))
+# hmda_18_cln <- hmda_18_cln %>% mutate(income = as.character(income))
+# 
+# 
+# hmda_all <- bind_rows(hmda_18_cln, hmda_19_cln, hmda_20_cln, hmda_21_cln, hmda_22_cln, hmda_23_cln, hmda_24_cln)
+# 
+# write_csv(hmda_all, "data/output/hmda_18_24_cln.csv")
+
+```
+
+... Here's the chunk to load in the pre-processed data
+
+```{r}
+
+# the processed file the code above generates 
+hmda_all <-  read_csv("data/raw/hmda_18_24_cln.csv.zip")
+
+```
+
+## Clean and analyze
+
+Our first big question is **How do we recognize DSCR loans in the data?**
+
+The Banner's method for this was developed with feedback from real estate experts and industry professionals. Here are the filters we're using to identify these loans in the data, and why:
+
+**Flags**
+
+-   **`no_dti`**: We create a flag for records with a missing or blank debt-to-income ratio. HMDA data reporting only asks lenders to report DTI if it was a factor in the decision to extend credit — but DSCR underwriting is based on whether the property generates enough rental income to cover the loan payments, not the borrower's personal finances, so DTI is typically not a factor and won't be reported.
+-   **`no_income`**: Same logic — we flag records with missing or blank income. Since DSCR loans are approved on the property's cash flow rather than what the borrower earns, income usually isn't a factor either and gets left blank.
+
+**Filters**
+
+-   **No DTI and no income**: We want both missing at once, since that combo is the clearest signal that this isn't a conventional loan.
+-   **Loan term 30–40 years**: DSCR loans almost always come in 30- or 40-year terms, so this cuts out things like short-term bridge loans or construction loans.
+-   **No GSE purchaser**: DSCR loans are non-QM — Fannie, Freddie, and the other government-backed entities can't buy them, so they won't show up as purchaser.
+-   **Business or commercial purpose**: These loans are for investment properties — not owner-occupied residences, primary or secondary. They should be recorded as for a business or commercial purpose.
+
+```{r}
+
+hmda_all_cln <- hmda_all %>%
+  mutate(no_dti = is.na(debt_to_income_ratio)|debt_to_income_ratio == "",
+         no_income = is.na(income)| income == "") %>%
+  mutate(is_dscr = case_when(
+      no_dti == T &
+      no_income == T &
+      loan_term >= 360 &
+      loan_term <= 480 &
+      purchaser_type %notin% c(1,2,3,4) &
+      business_or_commercial_purpose == 1 ~ "dscr",
+    TRUE ~ "other"
+  )) %>%
+  mutate(no_msa = case_when(is.na(derived_msa_md) ~ "no_msa",
+                            derived_msa_md == "" ~ "no_msa", 
+                            derived_msa_md == "99999" ~ "no_msa",
+                            derived_msa_md == "0" ~ "no_msa",
+                            TRUE ~ "msa")) 
+
+```
+
+We're going to use Baltimore as a case study for this analysis. The raw data includes fields for MSA code, state abbreviation and county FIPS, along with census tract (more on that in Chapter 2 below!). I'm lucky that Baltimore is both a city and a county, for geographic purposes — so we'll use county fips to select the city.
+
+*(Note that several other cities in the US — St. Louis, Philadelphia and New Orleans are three examples off the top of my head — are also independent cities or have boundaries coterminous with county lines. But if the one you're interested in is not, you can use census tracts and spatial interpolation to do some of this work. A little more on that below, but hit me up if you wanna talk about that at all!)*
+
+**Q: How many DSCR loans has Baltimore seen, year over year? What share of dollars rolling into the rental market come from DSCR loans?**
+
+How do you think we would express this? How could we write this share into a story, and what does it mean about investors in Baltimore?
+
+```{r}
+
+bmore_city_yoy <- hmda_all_cln %>%
+  # filter to just loans issued in the city of Baltimore -- note that 2% of rows in this data are missing county codes, and the vast majority of those have no more granular location indicators. 
+  filter(county_code == "24510") %>% 
+  group_by(activity_year, is_dscr) %>%
+  summarise(number_loans = n(),
+            dollars_loans = sum(loan_amount)) %>% 
+  pivot_wider(
+    names_from = is_dscr,
+    values_from = c(number_loans, dollars_loans), 
+    names_sep = "_"
+  ) %>%
+  mutate(total_loans = number_loans_dscr + number_loans_other,
+         total_loan_dollars = dollars_loans_dscr + dollars_loans_other, 
+         pct_loans_dscr = (number_loans_dscr/total_loans)*100,
+         pct_dollar_dscr = (dollars_loans_dscr/total_loan_dollars)*100)
+
+```
+
+**Q: How does that compare to the rest of the nation?**
+
+```{r}
+
+# first, we complete the same process on national data 
+national_yoy <- hmda_all_cln %>% 
+  group_by(activity_year, is_dscr) %>%
+  summarise(number_loans = n(),
+            dollars_loans = sum(loan_amount)) %>% 
+  pivot_wider(
+    names_from = is_dscr,
+    values_from = c(number_loans, dollars_loans), 
+    names_sep = "_"
+  ) %>%
+  mutate(total_loans = number_loans_dscr + number_loans_other,
+         total_loan_dollars = dollars_loans_dscr + dollars_loans_other, 
+         pct_loans_dscr = (number_loans_dscr/total_loans)*100,
+         pct_dollar_dscr = (dollars_loans_dscr/total_loan_dollars)*100)
+
+# then, we join the couple columns we care aout from that data with the other dataframe 
+bmore_v_national <- bmore_city_yoy %>% 
+  left_join(national_yoy %>% select(activity_year, natl_pct_loans_dscr = pct_loans_dscr, natl_pct_dollars_dscr = pct_dollar_dscr)) 
+
+```
+
+Let's chart the shares of total, to make it easier to understand for ourselves and for potential newsroom partners:
+
+```{r}
+# to plot, we make the data long 
+ bmore_v_national_long <- bmore_v_national %>%
+   select(activity_year, pct_dollar_dscr, natl_pct_dollar_dscr) %>%
+   pivot_longer(-activity_year, names_to = "geography", values_to = "pct") %>%
+   mutate(geography = if_else(geography == "pct_dollar_dscr", "Baltimore City", "National"))
+
+ggplot(bmore_v_national_long, aes(x = activity_year, y = pct, color = geography)) +
+  geom_line(linewidth = .75) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = 2018:2024) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1, accuracy = 0.1),
+                     limits = c(0, NA)) +
+  scale_color_manual(values = c("Baltimore City" = "#E63946", "National" = "#457B9D")) +
+  labs(title = "DSCR loans' share of rental home loan dollars, 2018–2024",
+       x = NULL, y = "Share dollars (%)", color = NULL) +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "top", panel.grid.minor = element_blank(),
+        plot.title = element_text(face = "bold"))
+
+```
+
+**Q: Which lenders originated the most DSCR loans in 2024?**
+
+Lending institutions in HMDA data are identified via `lei`, or legal entity identifiers — basically lengthy unique ids for financial institutions made up of a series of letters and numbers. To attach names to those numbers, we'll use the API for GLEIF, the Global Legal Entity Identifier Foundation, which maintains standardized data about LEIs around the world.
+
+```{r}
+# this will show us the top lenders... but we won't know their names 
+
+top_lenders_2024 <- hmda_all_cln %>%
+  filter(is_dscr == "dscr") %>%
+  filter(activity_year == 2024) %>% 
+  group_by(lei) %>% 
+  summarise(number_dscr_loans = n(), 
+            dscr_dollars = sum(loan_amount)) %>%
+  ungroup() %>% 
+  arrange(desc(number_dscr_loans)) %>% 
+  head(n = 15)
+
+```
+
+Let's hit the GLEIF API to get the names of these large lenders:
+
+```{r}
+
+leis <- top_lenders_2024 %>% pull(lei)
+
+# creating a new df mapping leis to their names
+lei_names <- tibble(
+  # lei column is the leis object 
+  lei = leis,
+  # lender name column
+  # iterate over every lei in the leis object and apply the function to each
+  lender_name = map_chr(leis, \(lei) {
+    # pausing between api calls
+    Sys.sleep(0.2)
+    
+    # set up path for http request
+    resp <- httr2::request("https://api.gleif.org/api/v1/lei-records") %>%
+      # append individual lei to end of path 
+      req_url_path_append(lei) %>%
+      # error handling 
+      req_error(is_error = \(resp) FALSE) %>%
+      # send the built request 
+      req_perform()
+    
+    # if response is anything but 200, return an NA 
+    if (resp_status(resp) != 200) return(NA_character_)
+    
+    resp %>%
+      # parses json response into an r list 
+      resp_body_json() %>%
+      # navigate the nested json data to find legal identifier name. If the path is empty, then return an NA
+      pluck("data", "attributes", "entity", "legalName", "name") %||% NA_character_
+  })
+)
+
+# write_csv(lei_names, "data/output/lei_names.csv")
+top_lenders_2024_named <- top_lenders_2024 %>% 
+  left_join(lei_names , by = "lei")
+
+```
+
+**Q: Can we get a sense of how Baltimore ranked among other geographies in terms of DSCR loan activity in 2024?**
+
+The below is one of the quickest ways of stacking geographies up against each other across the nation: We're using metropolitan statistical area/metropolitan division codes that come in the HMDA data. It's definitely an imperfect method, but it can give you a quick idea of how popular this loan product has become in your coverage area in comparison to other geos around the nation.
+
+Why MSA and not county? A few reasons: Metropolitan statistical areas must by definition contain an urban core of at least 50,000 people. Counties are sometimes coterminous with city lines and sometimes far removed from a city. These loans are geared towards investors and are used more in areas with rental demand, like cities. By using MSAs we can be sure we're capturing at least one urban core in each geo we compare, so we're not just seeing the divide between dense counties and those with fewer people. On the other hand, the larger geographies can water down the prevalence of DSCR loans in an urban core, and they're still wildly different sizes.
+
+We're going to start by finding the share of rental property loans and loan dollars coming from DSCR loans in each MSA recorded in the data.
+
+```{r}
+
+hmda_all_cln_msa <- hmda_all_cln %>%
+  # filtering so we're just looking at 2024 
+  filter(activity_year == 2024) %>% 
+  # making this a true boolean to use the mean() approach
+  mutate(is_dscr_boolean = is_dscr == "dscr") %>% 
+  # renaming 
+  rename('msa_code' = 'derived_msa_md') %>%
+  # as character for easier joining later 
+  mutate(msa_code = as.character(msa_code)) %>%
+  # loans must be in an MSA
+  filter(no_msa == "msa") %>%
+  # group by msa 
+  group_by(msa_code) %>%
+    summarise(
+      # share dscr loans
+      fraction_loans_dscr = mean(is_dscr_boolean, na.rm = TRUE),
+      # share dscr dollars 
+      fraction_dollars_dscr = sum(loan_amount[is_dscr_boolean], na.rm = TRUE)/sum(loan_amount, na.rm = TRUE)
+    ) %>%
+  ungroup() %>% 
+  arrange(desc(fraction_dollars_dscr)) 
+
+# let's take a look at this data 
+head(hmda_all_cln_msa)
+
+```
+
+Okay, so now we have share of DSCR loans and DSRC dollars by MSA, arranged so the MSA with the largest share of DSCR dollars in '24 is at the top of the list.
+
+But... we have no idea what that MSA is. While HMDA data supplies us with MSA codes, it doesn't give us their names. And comparison is complicated by the fact that some loans are reported by **metropolitan division**, a smaller geography the OMB carves out of larger MSAs.
+
+Here I'm using a core-based statistical area delineation file from the Census Bureau. I've tried this by pulling MSAs from `tidycensus`, but unfortunately the output doesn't include metropolitan division code.
+
+```{r}
+
+# Read OMB MSA/MD crosswalk (skip 2 non-header rows at top)
+msa_omb_raw <- read_csv("data/raw/msa_omb.csv",
+                        skip = 2,
+                        col_types = cols(.default = "c"))
+
+
+# now let's build our lookup table, with one row per MSA or MD
+msa_md_lookup <- bind_rows(
+  # All CBSAs (both those with and without Metropolitan Divisions)
+  msa_omb_raw %>%
+    distinct(`CBSA Code`, `CBSA Title`, `Metropolitan/Micropolitan Statistical Area`) %>%
+    # transmute is like mutate(), but it keeps only the cols you make -- useful for us. 
+    transmute(
+      msa_md_code = `CBSA Code`,
+      name        = `CBSA Title`,
+      type        = `Metropolitan/Micropolitan Statistical Area`
+    ), 
+
+  # Metropolitan Divisions (child units within large CBSAs)
+  msa_omb_raw %>%
+    # only rows that have an MD code 
+    filter(!is.na(`Metropolitan Division Code`) & `Metropolitan Division Code` != "") %>%
+    # distinct on the md code 
+    distinct(`Metropolitan Division Code`, `Metropolitan Division Title`) %>%
+    transmute(
+      msa_md_code = `Metropolitan Division Code`,
+      name        = `Metropolitan Division Title`,
+      type        = "Metropolitan Division"
+    )
+) %>%
+  arrange(msa_md_code)
+
+## let's take a look at what this data looks like
+head(msa_md_lookup)
+```
+
+Second-to-last step: Let's join the msa codes to the HMDA data
+
+```{r}
+
+hmda_msa <- left_join(hmda_all_cln_msa, msa_md_lookup, by = c("msa_code" = "msa_md_code"))
+
+```
+
+And last step: Where does Baltimore's MSA, Baltimore-Columbia-Towson, rank among other msas and metropolitan divisions?
+
+You'll notice that the share of DSCR loans/dollars in the MSA in '24 is quite a bit lower than the share of DSCR loans/dollars in the city in '24. It's very much worth noting that the analysis of metro geographies here **isn't necessarily going to give you a great sense of how popular these loans are in a city as compared to other similar geographies, emphasis on the word similar**. This analysis served as my jumping off point for digging deeper into Baltimore -- it told me my coverage area ranked pretty highly among others for this type of loan activity across the nation.
+
+```{r}
+
+baltimore_pct <- hmda_msa %>%
+  # calculates percent ranks 
+  mutate(pct_rank = percent_rank(fraction_dollars_dscr)) %>%
+  filter(msa_code == "12580") %>%
+  pull(pct_rank)
+
+```
+
+With this, we can write a sentence like: Baltimore saw more DSCR loan activity linked to rental homes in 2024 than 93% of MSAs where investment property loans were issued.
+
+# Chapter 2: getting granular
+
+ALRIGHT! We've identified that DSCR loans have garnered a large chunk of the rental home loan market in Baltimore since 2020, and that the Baltimore metro region is seeing more of these loans than most metro regions where lenders reported originating loans for investment property in 2024. What can we say about the neighborhoods in the city where these loans are being originated? Are they popping up more in some regions than others?
+
+This is where we finally take advantage of the fact that HMDA data comes with **census tracts**. Once again we get lucky that Baltimore city is its own county, which means census tracts fit perfectly within the city. That's not true of many cities, which means doing this in your coverage area might mean doing some spatial interpolation.
+
+**Q: Where in Baltimore are these loans most concentrated? Are there any demographic characteristics that follow similar patterns?**
+
+This is a more involved question! We'll take it step by step. Our first step is to make a dataframe that counts total investment loans + dscr loans by census tract. To make this computationally faster/easier, we'll start by filtering for census tracts that fall within the city of Baltimore -- those that begin with "24510", the FIPS code that identifies the city.
+
+```{r}
+
+baltimore_census_tracts <- hmda_all_cln %>% 
+  # just baltimore census tracts
+  filter(str_starts(census_tract, "24510")) %>%
+  # let's look at the years since dscr loans began picking up in the city -- so starting in '21 
+  filter(activity_year >= 2021) %>%
+  # group by census tract and is dscr
+  group_by(census_tract, is_dscr) %>%
+  # same logic as before 
+  summarise(number_loans = n(),
+            dollars_loans = sum(loan_amount)) %>%
+    pivot_wider(
+    names_from = is_dscr,
+    values_from = c(number_loans, dollars_loans), 
+    names_sep = "_"
+   ) %>%
+  ungroup() %>% 
+  mutate(number_loans_other = ifelse(is.na(number_loans_other), 0, number_loans_other),
+         number_loans_dscr = ifelse(is.na(number_loans_dscr), 0, number_loans_dscr),
+         dollars_loans_dscr = ifelse(is.na(dollars_loans_dscr), 0, dollars_loans_dscr),
+         dollars_loans_other = ifelse(is.na(dollars_loans_other), 0, dollars_loans_other),
+         total_loans = number_loans_dscr + number_loans_other,
+         total_loan_dollars = dollars_loans_dscr + dollars_loans_other)
+
+head(baltimore_census_tracts)
+
+```
+
+Okay, so now we have this in the format we'll need it in: One row per census tract, with total number of loans, dscr loans and other loans all split out. To make it mappable + to examine the characteristics of areas where DSCR loans are concentrated,we gotta pull in census data. Since we're using data that spans multiple years here — loans originated every year 2021 through 2024 — we'll be using the latest vintage of 5-year census data, which spans almost the same time period.
+
+*Note: To make this code chunk work, you'll need a census api key. They're free + pretty easy to get; you just go to [this website](https://api.census.gov/data/key_signup.html), enter your details and receive your key! If you haven't used `tidycensus` before and want to try it, I'd highly recommend starting with [Kyle Walker's documentation](https://walker-data.com/tidycensus/articles/basic-usage.html). I found it easy to follow and a great jumping off point!*
+
+```{r}
+
+get_bmore_tracts <- get_acs(
+    geography = "tract",
+    state = "MD",
+    county = "Baltimore city",
+    year = 2024,
+    survey = "acs5",
+    geometry = TRUE,
+    variables = c(
+      total_housing_units = "B25002_001", 
+      occupied_units = "B25002_002", 
+      vacant_units = "B25002_003", 
+      totpop = "B01003_001", 
+      whitepop = "B02001_002", 
+      blackpop = "B02001_003"
+    ),
+    output = "wide"
+) %>% clean_names() %>% 
+  # for the purposes of this analysis, we're going to focus on estimates and not worry as much about margin of error.
+  select(geoid, name, ends_with("_e")) 
+
+```
+
+Next, we'll join the two datasets and calculate some quick shares (demographic characteristics by tract, % vacant housing units, etc.) to make mapping easier.
+
+```{r}
+
+bmore_tracts_hmda <- get_bmore_tracts %>%
+  # two out of the 197 tracts HMDA data reports as having rental home loans don't pop up in the ACS data. Likely a coding error on a lender's part. 
+  left_join(baltimore_census_tracts, by = c("geoid" = "census_tract")) %>%
+  mutate(pct_white = (whitepop_e/totpop_e)*100,
+         pct_black = (blackpop_e/totpop_e)*100, 
+         pct_vacant = (vacant_units_e/total_housing_units_e)*100)
+
+```
+
+Finally, we can compare and contrast the characteristics of city neighborhoods where DSCR loans are being issued. Our reporting showed that most of the loans going bad were in Baltimore's "Black Butterfly" — a term coined by Morgan State University researcher Lawrence T. Brown to describe the majority-Black regions that fan out on either side of the city, where residents have historically been denied access to capital.
+
+```{r}
+
+bmore_tracts_hmda <- bmore_tracts_hmda %>%
+   mutate(majority_black = pct_black > 50)
+
+bmore_tracts_hmda %>%
+   st_drop_geometry() %>%
+   group_by(majority_black) %>%
+   summarise(
+     n_tracts = n(),
+     median_dscr_loans = median(number_loans_dscr, na.rm = TRUE),
+     avg_dscr_loans   = mean(number_loans_dscr, na.rm = TRUE),
+     median_pct_vacant = median(pct_vacant, na.rm = TRUE)
+   ) %>% 
+  print()
+
+```
+
+Let's visualize:
+
+```{r}
+
+ map_dscr <- mapview(bmore_tracts_hmda, zcol = "number_loans_dscr",
+                     layer.name = "DSCR loans (count)",
+                     col.regions = RColorBrewer::brewer.pal(9, "Purples"))
+
+ map_black <- mapview(bmore_tracts_hmda, zcol = "pct_black",
+                      layer.name = "% Black residents",
+                      col.regions = RColorBrewer::brewer.pal(9, "Purples"))
+
+ map_vacant <- mapview(bmore_tracts_hmda, zcol = "pct_vacant",
+                       layer.name = "% Vacant housing units",
+                       col.regions = RColorBrewer::brewer.pal(9, "Purples"))
+
+ # Side-by-side synced view — great for conference demo
+sync(map_dscr, map_black, map_vacant)
+
+```
+
+#-30-
